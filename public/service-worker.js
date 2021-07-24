@@ -1,93 +1,78 @@
-let db;
-let budgetVersion;
+console.log("Hi from your service-worker.js file!");
 
-// Create a new db request for a "budget" database.
-const request = indexedDB.open('BudgetDB', budgetVersion || 1);
+const FILES_TO_CACHE = [
+    '/index.html',
+    '/index.js',
+    '/styles.css',
+    '/manifest.webmanifest',
+    '/icons/icon-192x192.png',
+    '/icons/icon-512x512.png',
+    '/db.js',
+];
 
-request.onupgradeneeded = function (e) {
-  console.log('Upgrade needed in IndexDB');
+const CACHE_NAME = 'static-cache-v2';
+const DATA_CACHE_NAME = 'data-cache-v1';
 
-  const { oldVersion } = e;
-  const newVersion = e.newVersion || db.version;
+// Install
 
-  console.log(`DB Updated from version ${oldVersion} to ${newVersion}`);
+self.addEventListener('install', function (evt) {
+    // Pre-cache transaction data
+    evt.waitUntil(
+        caches.open(DATA_CACHE_NAME).then((cache) => cache.add('/api/transaction'))
+    );
 
-  db = e.target.result;
+    // Pre-cache all static assets
+    evt.waitUntil(
+        caches.open(CACHE_NAME).then((cache) => cache.addAll(FILES_TO_CACHE))
+    );
 
-  if (db.objectStoreNames.length === 0) {
-    db.createObjectStore('BudgetStore', { autoIncrement: true });
-  }
-};
+    // Tell the browser to activate this service worker immediately once it has finished installing
+    self.skipWaiting();
+});
 
-request.onerror = function (e) {
-  console.log(`Woops! ${e.target.errorCode}`);
-};
+self.addEventListener('activate', function (evt) {
+    evt.waitUntil(
+        caches.keys().then(keyList => {
+            return Promise.all(
+                keyList.map(key => {
+                    if (key !== CACHE_NAME && key !== DATA_CACHE_NAME) {
+                        console.log('Removing old cache data', key);
+                        return caches.delete(key);
+                    }
+                })
+            );
+        })
+    );
 
-function checkDatabase() {
-  console.log('check db invoked');
+    self.clients.claim();
+});
 
-  // Open a transaction on your BudgetStore db
-  let transaction = db.transaction(['BudgetStore'], 'readwrite');
+self.addEventListener('fetch', function (evt) {
+    if (evt.request.url.includes('/api')) {
+        evt.respondWith(
+            caches.open(DATA_CACHE_NAME).then(cache => {
+                return fetch(evt.request)
+                .then(response => {
+                    if (response.status === 200) {
+                        cache.put(evt.request.url, response.clone());
+                    }
 
-  // access your BudgetStore object
-  const store = transaction.objectStore('BudgetStore');
+                    return response;
+                })
+                .catch(err => {
+                    return cache.match(evt.request);
+                });
+            }).catch(err => console.log(err))
+        );
 
-  // Get all records from store and set to a variable
-  const getAll = store.getAll();
-
-  // If the request was successful
-  getAll.onsuccess = function () {
-    // If there are items in the store, we need to bulk add them when we are back online
-    if (getAll.result.length > 0) {
-      fetch('/api/transaction/bulk', {
-        method: 'POST',
-        body: JSON.stringify(getAll.result),
-        headers: {
-          Accept: 'application/json, text/plain, */*',
-          'Content-Type': 'application/json',
-        },
-      })
-        .then((response) => response.json())
-        .then((res) => {
-          // If our returned response is not empty
-          if (res.length !== 0) {
-            // Open another transaction to BudgetStore with the ability to read and write
-            transaction = db.transaction(['BudgetStore'], 'readwrite');
-
-            // Assign the current store to a variable
-            const currentStore = transaction.objectStore('BudgetStore');
-
-            // Clear existing entries because our bulk add was successful
-            currentStore.clear();
-            console.log('Clearing store 🧹');
-          }
-        });
+        return;
     }
-  };
-}
 
-request.onsuccess = function (e) {
-  console.log('success');
-  db = e.target.result;
-
-  // Check if app is online before reading from db
-  if (navigator.onLine) {
-    console.log('Backend online! 🗄️');
-    checkDatabase();
-  }
-};
-
-const saveRecord = (record) => {
-  console.log('Save record invoked');
-  // Create a transaction on the BudgetStore db with readwrite access
-  const transaction = db.transaction(['BudgetStore'], 'readwrite');
-
-  // Access your BudgetStore object store
-  const store = transaction.objectStore('BudgetStore');
-
-  // Add record to your store with add method.
-  store.add(record);
-};
-
-// Listen for app coming back online
-window.addEventListener('online', checkDatabase);
+    evt.respondWith(
+        caches.open(CACHE_NAME).then(cache => {
+            return cache.match(evt.request).then(response => {
+                return response || fetch(evt.request);
+            });
+        })
+    );
+});
